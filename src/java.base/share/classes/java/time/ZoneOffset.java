@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -86,6 +86,8 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import jdk.internal.vm.annotation.Stable;
+
 /**
  * A time-zone offset from Greenwich/UTC, such as {@code +02:00}.
  * <p>
@@ -161,13 +163,18 @@ public final class ZoneOffset
     public static final ZoneOffset MAX = ZoneOffset.ofTotalSeconds(MAX_SECONDS);
 
     /**
-     * The total offset in seconds.
+     * @serial The total offset in seconds.
      */
     private final int totalSeconds;
     /**
      * The string form of the time-zone offset.
      */
     private final transient String id;
+    /**
+     * The zone rules for an offset will always return this offset. Cache it for efficiency.
+     */
+    @Stable
+    private transient ZoneRules rules;
 
     //-----------------------------------------------------------------------
     /**
@@ -421,8 +428,10 @@ public final class ZoneOffset
             ZoneOffset result = SECONDS_CACHE.get(totalSecs);
             if (result == null) {
                 result = new ZoneOffset(totalSeconds);
-                SECONDS_CACHE.putIfAbsent(totalSecs, result);
-                result = SECONDS_CACHE.get(totalSecs);
+                var existing = SECONDS_CACHE.putIfAbsent(totalSecs, result);
+                if (existing != null) {
+                    result = existing;
+                }
                 ID_CACHE.putIfAbsent(result.getId(), result);
             }
             return result;
@@ -438,7 +447,6 @@ public final class ZoneOffset
      * @param totalSeconds  the total time-zone offset in seconds, from -64800 to +64800
      */
     private ZoneOffset(int totalSeconds) {
-        super();
         this.totalSeconds = totalSeconds;
         id = buildId(totalSeconds);
     }
@@ -504,7 +512,21 @@ public final class ZoneOffset
      */
     @Override
     public ZoneRules getRules() {
-        return ZoneRules.of(this);
+        ZoneRules rules = this.rules;
+        if (rules == null) {
+            rules = this.rules = ZoneRules.of(this);
+        }
+        return rules;
+    }
+
+    @Override
+    public ZoneId normalized() {
+        return this;
+    }
+
+    @Override
+    /* package-private */ ZoneOffset getOffset(long epochSecond) {
+        return this;
     }
 
     //-----------------------------------------------------------------------
@@ -698,7 +720,9 @@ public final class ZoneOffset
      * The comparison is "consistent with equals", as defined by {@link Comparable}.
      *
      * @param other  the other date to compare to, not null
-     * @return the comparator value, negative if less, positive if greater
+     * @return the comparator value, that is less than zero if this totalSeconds is
+     *          less than {@code other} totalSeconds, zero if they are equal,
+     *          greater than zero if this totalSeconds is greater than {@code other} totalSeconds
      * @throws NullPointerException if {@code other} is null
      */
     @Override

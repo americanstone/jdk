@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2025, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012, 2019 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -23,7 +23,6 @@
  *
  */
 
-#include "precompiled.hpp"
 #include "asm/macroAssembler.inline.hpp"
 #include "gc/shared/barrierSet.hpp"
 #include "gc/shared/barrierSetAssembler.hpp"
@@ -56,7 +55,7 @@ address JNI_FastGetField::generate_fast_get_int_field0(BasicType type) {
     case T_FLOAT:   name = "jni_fast_GetFloatField";   break;
     case T_DOUBLE:  name = "jni_fast_GetDoubleField";  break;
     default:        ShouldNotReachHere();
-      name = NULL;  // unreachable
+      name = nullptr;  // unreachable
   }
   ResourceMark rm;
   BufferBlob* blob = BufferBlob::create(name, BUFFER_SIZE);
@@ -149,7 +148,7 @@ address JNI_FastGetField::generate_fast_get_int_field0(BasicType type) {
     case T_FLOAT:   slow_case_addr = jni_GetFloatField_addr();   break;
     case T_DOUBLE:  slow_case_addr = jni_GetDoubleField_addr();  break;
     default:        ShouldNotReachHere();
-      slow_case_addr = NULL;  // unreachable
+      slow_case_addr = nullptr;  // unreachable
   }
   __ load_const_optimized(R12, slow_case_addr, R0);
   __ call_c_and_return_to_caller(R12); // tail call

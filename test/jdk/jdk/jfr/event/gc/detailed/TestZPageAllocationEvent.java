@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,7 +32,7 @@ import jdk.test.lib.jfr.EventNames;
 import jdk.test.lib.jfr.Events;
 
 /**
- * @test TestZPageAllocationEvent
+ * @test
  * @requires vm.hasJFR & vm.gc.Z
  * @key jfr
  * @library /test/lib /test/jdk /test/hotspot/jtreg
@@ -57,7 +57,7 @@ public class TestZPageAllocationEvent {
             List<RecordedEvent> events = Events.fromRecording(recording);
             System.out.println("Events: " + events.size());
             Events.hasEvents(events);
-            for (RecordedEvent event : Events.fromRecording(recording)) {
+            for (RecordedEvent event : events) {
                 Events.assertField(event, "size").atLeast(2L * 1024 * 1024);
             }
         }
