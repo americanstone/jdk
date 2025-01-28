@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2002, 2021, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2021 SAP SE. All rights reserved.
+ * Copyright (c) 2002, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,6 +34,7 @@
 #include "gc/shared/barrierSetAssembler.hpp"
 #include "oops/accessDecorators.hpp"
 #include "oops/compressedOops.hpp"
+#include "runtime/os.inline.hpp"
 #include "runtime/safepointMechanism.hpp"
 #include "runtime/vm_version.hpp"
 #include "utilities/powerOfTwo.hpp"
@@ -190,8 +191,18 @@ inline void MacroAssembler::set_oop(AddressLiteral obj_addr, Register d) {
 }
 
 inline void MacroAssembler::pd_patch_instruction(address branch, address target, const char* file, int line) {
-  jint& stub_inst = *(jint*) branch;
-  stub_inst = patched_branch(target - branch, stub_inst, 0);
+  if (is_branch(branch)) {
+    jint& stub_inst = *(jint*) branch;
+    stub_inst = patched_branch(target - branch, stub_inst, 0);
+  } else if (is_calculate_address_from_global_toc_at(branch + BytesPerInstWord, branch)) {
+    const address inst1_addr = branch;
+    const address inst2_addr = branch + BytesPerInstWord;
+    patch_calculate_address_from_global_toc_at(inst2_addr, inst1_addr, target);
+  } else if (is_load_const_at(branch)) {
+    patch_const(branch, (long)target);
+  } else {
+    assert(false, "instruction at " PTR_FORMAT " not recognized", p2i(branch));
+  }
 }
 
 // Relocation of conditional far branches.
@@ -241,7 +252,7 @@ inline bool MacroAssembler::is_bc_far_variant3_at(address instruction_addr) {
 // if CCR0bi is "equal", dst is set to 0, otherwise it's set to -1.
 inline void MacroAssembler::set_cmp3(Register dst) {
   assert_different_registers(dst, R0);
-  // P10, prefer using setbc intructions
+  // P10, prefer using setbc instructions
   if (VM_Version::has_brw()) {
     setbc(R0, CCR0, Assembler::greater); // Set 1 to R0 if CCR0bi is "greater than", otherwise 0
     setnbc(dst, CCR0, Assembler::less); // Set -1 to dst if CCR0bi is "less than", otherwise 0
@@ -261,6 +272,43 @@ inline void MacroAssembler::set_cmpu3(Register dst, bool treat_unordered_like_le
     cror(CCR0, Assembler::greater, CCR0, Assembler::summary_overflow); // treat unordered like greater
   }
   set_cmp3(dst);
+}
+
+// Branch-free implementation to convert !=0 to 1
+// Set register dst to 1 if dst is non-zero. Uses setbcr instruction on Power10.
+inline void MacroAssembler::normalize_bool(Register dst, Register temp, bool is_64bit) {
+
+  if (VM_Version::has_brw()) {
+    if (is_64bit) {
+      cmpdi(CCR0, dst, 0);
+    } else {
+      cmpwi(CCR0, dst, 0);
+    }
+    setbcr(dst, CCR0, Assembler::equal);
+  } else {
+    assert_different_registers(temp, dst);
+    neg(temp, dst);
+    orr(temp, dst, temp);
+    if (is_64bit) {
+      srdi(dst, temp, 63);
+    } else {
+      srwi(dst, temp, 31);
+    }
+  }
+}
+
+inline void MacroAssembler::f2hf(Register dst, FloatRegister src, FloatRegister tmp) {
+  // Single precision values in FloatRegisters use double precision format on PPC64.
+  xscvdphp(tmp->to_vsr(), src->to_vsr());
+  mffprd(dst, tmp);
+  // Make it a proper short (sign-extended).
+  extsh(dst, dst);
+}
+
+inline void MacroAssembler::hf2f(FloatRegister dst, Register src) {
+  mtfprd(dst, src);
+  // Single precision values in FloatRegisters use double precision format on PPC64.
+  xscvhpdp(dst->to_vsr(), dst->to_vsr());
 }
 
 // Convenience bc_far versions
@@ -353,10 +401,10 @@ inline void MacroAssembler::access_store_at(BasicType type, DecoratorSet decorat
                                             Register tmp1, Register tmp2, Register tmp3,
                                             MacroAssembler::PreservationLevel preservation_level) {
   assert((decorators & ~(AS_RAW | IN_HEAP | IN_NATIVE | IS_ARRAY | IS_NOT_NULL |
-                         ON_UNKNOWN_OOP_REF)) == 0, "unsupported decorator");
+                         ON_UNKNOWN_OOP_REF | IS_DEST_UNINITIALIZED)) == 0, "unsupported decorator");
   BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
   bool as_raw = (decorators & AS_RAW) != 0;
-  decorators = AccessInternal::decorator_fixup(decorators);
+  decorators = AccessInternal::decorator_fixup(decorators, type);
   if (as_raw) {
     bs->BarrierSetAssembler::store_at(this, decorators, type,
                                       base, ind_or_offs, val,
@@ -376,7 +424,7 @@ inline void MacroAssembler::access_load_at(BasicType type, DecoratorSet decorato
   assert((decorators & ~(AS_RAW | IN_HEAP | IN_NATIVE | IS_ARRAY | IS_NOT_NULL |
                          ON_PHANTOM_OOP_REF | ON_WEAK_OOP_REF)) == 0, "unsupported decorator");
   BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
-  decorators = AccessInternal::decorator_fixup(decorators);
+  decorators = AccessInternal::decorator_fixup(decorators, type);
   bool as_raw = (decorators & AS_RAW) != 0;
   if (as_raw) {
     bs->BarrierSetAssembler::load_at(this, decorators, type,
@@ -397,11 +445,11 @@ inline void MacroAssembler::load_heap_oop(Register d, RegisterOrConstant offs, R
                  preservation_level, L_handle_null);
 }
 
-inline void MacroAssembler::store_heap_oop(Register d, RegisterOrConstant offs, Register s1,
+inline void MacroAssembler::store_heap_oop(Register val, RegisterOrConstant offs, Register base,
                                            Register tmp1, Register tmp2, Register tmp3,
                                            MacroAssembler::PreservationLevel preservation_level,
                                            DecoratorSet decorators) {
-  access_store_at(T_OBJECT, decorators | IN_HEAP, s1, offs, d, tmp1, tmp2, tmp3, preservation_level);
+  access_store_at(T_OBJECT, decorators | IN_HEAP, base, offs, val, tmp1, tmp2, tmp3, preservation_level);
 }
 
 inline Register MacroAssembler::encode_heap_oop_not_null(Register d, Register src) {
@@ -418,7 +466,7 @@ inline Register MacroAssembler::encode_heap_oop_not_null(Register d, Register sr
 }
 
 inline Register MacroAssembler::encode_heap_oop(Register d, Register src) {
-  if (CompressedOops::base() != NULL) {
+  if (CompressedOops::base() != nullptr) {
     if (VM_Version::has_isel()) {
       cmpdi(CCR0, src, 0);
       Register co = encode_heap_oop_not_null(d, src);
@@ -450,7 +498,7 @@ inline Register MacroAssembler::decode_heap_oop_not_null(Register d, Register sr
     sldi(d, current, CompressedOops::shift());
     current = d;
   }
-  if (CompressedOops::base() != NULL) {
+  if (CompressedOops::base() != nullptr) {
     add_const_optimized(d, current, CompressedOops::base(), R0);
     current = d;
   }
@@ -460,7 +508,7 @@ inline Register MacroAssembler::decode_heap_oop_not_null(Register d, Register sr
 inline void MacroAssembler::decode_heap_oop(Register d) {
   Label isNull;
   bool use_isel = false;
-  if (CompressedOops::base() != NULL) {
+  if (CompressedOops::base() != nullptr) {
     cmpwi(CCR0, d, 0);
     if (VM_Version::has_isel()) {
       use_isel = true;
